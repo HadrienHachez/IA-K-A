@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # kingandassassins.py
 # Author: Sébastien Combéfis
+# Author IA : Hadrien Hachez
 # Version: April 29, 2016
 
 import argparse
@@ -8,6 +9,8 @@ import json
 import random
 import socket
 import sys
+import IA
+import copy
 
 from lib import game
 
@@ -82,7 +85,7 @@ KA_INITIAL_STATE = {
     'lastopponentmove': [],
     'arrested': [],
     'killed': {
-        'kings': 0,
+        'knights': 0,
         'assassins': 0
     }
 }
@@ -100,6 +103,9 @@ class KingAndAssassinsState(game.GameState):
 
     def __init__(self, initialstate=KA_INITIAL_STATE):
         super().__init__(initialstate)
+    
+    def _nextfree(self, x, y, dir):
+        nx, ny = self._getcoord((x, y, dir))
 
     def update(self, moves, player):
         visible = self._state['visible']
@@ -113,7 +119,23 @@ class KingAndAssassinsState(game.GameState):
                 p = people[x][y]
                 if p is None:
                     raise game.InvalidMoveException('{}: there is no one to move'.format(move))
-                pass
+                nx, ny = self._getcoord((x, y, d))
+                new = people[nx][ny]
+                # King, assassins, villagers can only move on a free cell
+                if p != 'knight' and new is not None:
+                    raise game.InvalidMoveException('{}: cannot move on a cell that is not free'.format(move))
+                if p == 'king' and BOARD[nx][ny] == 'R':
+                    raise game.InvalidMoveException('{}: the king cannot move on a roof'.format(move))
+                if p in POPULATION.union({'assassin'}) and player != 0:
+                    raise game.InvalidMoveException('{}: villagers and assassins can only be moved by player 0'.format(move))
+                if p in {'king', 'knight'} and player != 1:
+                    raise game.InvalidMoveException('{}: the king and knights can only be moved by player 1'.format(move))
+                # Move granted if cell is free
+                if new is None:
+                    people[x][y], people[nx][ny] = people[nx][ny], people[x][y]
+                # If cell is not free, check if the knight can push villagers
+                else:
+                    pass
             # ('arrest', x, y, dir): arrests the villager in direction dir with knight at position (x, y)
             elif move[0] == 'arrest':
                 if player != 1:
@@ -130,7 +152,24 @@ class KingAndAssassinsState(game.GameState):
                 people[tx][ty] = None
             # ('kill', x, y, dir): kills the assassin/knight in direction dir with knight/assassin at position (x, y)
             elif move[0] == 'kill':
-                pass
+                x, y, d = int(move[1]), int(move[2]), move[3]
+                killer = people[x][y]
+                if killer == 'assassin' and player != 0:
+                    raise game.InvalidMoveException('{}: kill action for assassin only possible for player 0'.format(move))
+                if killer == 'knight' and player != 1:
+                    raise game.InvalidMoveException('{}: kill action for knight only possible for player 1'.format(move))
+                tx, ty = self._getcoord((x, y, d))
+                target = people[tx][ty]
+                if target is None:
+                    raise game.InvalidMoveException('{}: there is no one to kill'.format(move))
+                if killer == 'assassin' and target == 'knight':
+                    visible['killed']['knights'] += 1
+                    people[tx][tx] = None
+                elif killer == 'knight' and target == 'assassin':
+                    visible['killed']['assassins'] += 1
+                    people[tx][tx] = None
+                else:
+                    raise game.InvalidMoveException('{}: forbidden kill'.format(move))
             # ('attack', x, y, dir): attacks the king in direction dir with assassin at position (x, y)
             elif move[0] == 'attack':
                 if player != 0:
@@ -256,28 +295,68 @@ class KingAndAssassinsClient(game.GameClient):
         pass
 
     def _nextmove(self, state):
-        # Two possible situations:
-        # - If the player is the first to play, it has to select his/her assassins
-        #   The move is a dictionary with a key 'assassins' whose value is a list of villagers' names
-        # - Otherwise, it has to choose a sequence of actions
-        #   The possible actions are:
-        #   ('move', x, y, dir): moves person at position (x,y) of one cell in direction dir
-        #   ('arrest', x, y, dir): arrests the villager in direction dir with knight at position (x, y)
-        #   ('kill', x, y, dir): kills the assassin/knight in direction dir with knight/assassin at position (x, y)
-        #   ('attack', x, y, dir): attacks the king in direction dir with assassin at position (x, y)
-        #   ('reveal', x, y): reveals villager at position (x,y) as an assassin
+        input()
         state = state._state['visible']
         if state['card'] is None:
-            return json.dumps({'assassins': ['monk', 'hooker', 'fishwoman']}, separators=(',', ':'))
+            self.MyKillers=IA.choicekillers(state)
+            return json.dumps({'assassins': self.MyKillers}, separators=(',', ':'))
         else:
             if self._playernb == 0:
-                for i in range(10):
-                    for j in range(10):
-                        if state['people'][i][j] in {'monk', 'hooker', 'fishwoman'}:
-                            return json.dumps({'actions': [('reveal', i, j)]}, separators=(',', ':'))
-                return json.dumps({'actions': []}, separators=(',', ':'))
+                        #   ----------------------
+                        #         ASSASSINS
+                        #   ----------------------
+                MyVillagers,king=IA.findtroops(state,POPULATION)
+                paV=state['card'][3]
+                MyActions=[]
+                #   Time to reveal and kill the KING ?
+                hitmen,king=IA.findtroops(state,self.MyKillers)
+                maybekiller=IA.able2kill(hitmen,paV,king,MyActions)
+                if len(maybekiller)>0:
+                    actions,Cost=IA.time2kill(maybekiller,king,state,paV)
+                    if actions!=-1:
+                        for action in actions:
+                            MyActions.append(action)
+                        paV+=-Cost
+                #   déplacement aléatoire des villageois
+                state,MyActions=IA.randommove(MyVillagers,paV,king,state,MyActions,{None},50)
+                
+                return json.dumps({'actions': MyActions}, separators=(',', ':'))
+                
+            
             else:
-                return json.dumps({'actions': []}, separators=(',', ':'))
+                        #   ----------------------
+                        #            KING
+                        #   ----------------------
+                MyArmies,king=IA.findtroops(state,{'knight'})
+                paC=state['card'][1]
+                MyActions=[]
+                #   déplacement aléatoire des chevaliers
+                state,MyActions=IA.randommove(MyArmies,paC,['coinHG',1,1,'R'],state,MyActions,{None},50)
+                money=state['card'][0]
+                #   déplacement aléatoire du roi
+                it=0
+                while money>0 and it<5:
+                    guy=king                    
+                    if guy[2]>1 and state['people'][guy[1]][guy[2]-1] ==None and state['board'][guy[1]][guy[2]-1]=='G':
+                        MyActions.append(('move',guy[1],guy[2],'W'))
+                        guy[2]+=-1
+                        money+=-1
+                    elif guy[1]>1 and state['people'][guy[1]-1][guy[2]]==None and state['board'][guy[1]-1][guy[2]]=='G':
+                        MyActions.append(('move',guy[1],guy[2],'N'))
+                        guy[1]+=-1
+                        money+=-1
+                    elif guy[1]<1 and state['people'][guy[1]+1][guy[2]]==None and state['board'][guy[1]+1][guy[2]]=='G':
+                        MyActions.append(('move',guy[1],guy[2],'S'))
+                        guy[1]+=1
+                        money+=-1
+                    elif guy[2]<1 and state['people'][guy[1]][guy[2]+1]==None and state['board'][guy[1]][guy[2]+1]=='G':
+                        MyActions.append(('move',guy[1],guy[2],'E'))
+                        guy[2]+=1
+                        money+=-1
+                    it+=1
+                return json.dumps({'actions': MyActions}, separators=(',', ':'))
+            
+        
 
 
 if __name__ == '__main__':
